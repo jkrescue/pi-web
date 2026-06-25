@@ -485,6 +485,16 @@ const DEEPSEEK_COMPAT = {
   requiresReasoningContentOnAssistantMessages: true,
 } as const;
 
+const NIM_STRICT_COMPAT = {
+  supportsDeveloperRole: false,
+  supportsReasoningEffort: false,
+  supportsUsageInStreaming: false,
+  supportsStore: false,
+  supportsStrictMode: false,
+  supportsLongCacheRetention: false,
+  maxTokensField: "max_tokens",
+} as const;
+
 function hasDeepseekCompat(model: ModelEntry): boolean {
   return model.compat?.thinkingFormat === "deepseek";
 }
@@ -497,6 +507,22 @@ function setDeepseekCompat(model: ModelEntry, enabled: boolean): ModelEntry {
   const rest = { ...model.compat };
   delete rest.thinkingFormat;
   delete rest.requiresReasoningContentOnAssistantMessages;
+  return { ...model, compat: Object.keys(rest).length ? rest : undefined };
+}
+
+function hasNimStrictCompat(model: ModelEntry): boolean {
+  return Object.entries(NIM_STRICT_COMPAT).every(([key, value]) => model.compat?.[key] === value);
+}
+
+function setNimStrictCompat(model: ModelEntry, enabled: boolean): ModelEntry {
+  if (enabled) {
+    return { ...model, compat: { ...(model.compat ?? {}), ...NIM_STRICT_COMPAT } };
+  }
+  if (!model.compat) return model;
+  const rest = { ...model.compat };
+  for (const key of Object.keys(NIM_STRICT_COMPAT)) {
+    delete rest[key];
+  }
   return { ...model, compat: Object.keys(rest).length ? rest : undefined };
 }
 
@@ -648,6 +674,11 @@ function ModelDetail({
         <Check label="Reasoning / thinking" checked={model.reasoning ?? false} onChange={(v) => set("reasoning", v || undefined)} />
         <Check label="Image input" checked={model.input?.includes("image") ?? false}
           onChange={(v) => set("input", v ? ["text", "image"] : undefined)} />
+        <Check
+          label="NIM / strict OpenAI-compatible compat"
+          checked={hasNimStrictCompat(model)}
+          onChange={(v) => onChange(setNimStrictCompat(model, v))}
+        />
       </div>
 
       {model.reasoning && (
