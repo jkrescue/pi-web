@@ -19,6 +19,7 @@ interface Props {
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  fallbackModel?: { provider: string; modelId: string } | null;
   entryId?: string;
   onFork?: (entryId: string) => void;
   forking?: boolean;
@@ -61,12 +62,12 @@ function copyText(text: string): Promise<void> {
   }
 }
 
-export function MessageView({ message, isStreaming, toolResults, modelNames, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp }: Props) {
+export function MessageView({ message, isStreaming, toolResults, modelNames, fallbackModel, entryId, onFork, forking, onNavigate, prevAssistantEntryId, onEditContent, showTimestamp, prevTimestamp }: Props) {
   if (message.role === "user") {
     return <UserMessageView message={message as UserMessage} entryId={entryId} onFork={onFork} forking={forking} onNavigate={onNavigate} prevAssistantEntryId={prevAssistantEntryId} onEditContent={onEditContent} />;
   }
   if (message.role === "assistant") {
-    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
+    return <AssistantMessageView message={message as AssistantMessage} isStreaming={isStreaming} toolResults={toolResults} modelNames={modelNames} fallbackModel={fallbackModel} showTimestamp={showTimestamp} prevTimestamp={prevTimestamp} />;
   }
   if (message.role === "toolResult") {
     // Rendered inline under its toolCall — skip standalone rendering if paired
@@ -278,6 +279,7 @@ function AssistantMessageView({
   isStreaming,
   toolResults,
   modelNames,
+  fallbackModel,
   showTimestamp,
   prevTimestamp,
 }: {
@@ -285,6 +287,7 @@ function AssistantMessageView({
   isStreaming?: boolean;
   toolResults?: Map<string, ToolResultMessage>;
   modelNames?: Record<string, string>;
+  fallbackModel?: { provider: string; modelId: string } | null;
   showTimestamp?: boolean;
   prevTimestamp?: number;
 }) {
@@ -328,6 +331,12 @@ function AssistantMessageView({
     .filter((b): b is TextContent => b.type === "text")
     .map((b) => b.text)
     .join("\n");
+
+  const provider = message.provider ?? fallbackModel?.provider;
+  const modelId = message.model ?? fallbackModel?.modelId;
+  const modelLabel = provider && modelId
+    ? (modelNames?.[`${provider}:${modelId}`] ?? modelNames?.[modelId] ?? modelId)
+    : null;
 
   const copyContent = () => {
     copyText(textContent).then(() => {
@@ -407,8 +416,8 @@ function AssistantMessageView({
           gap: 6,
         }}
       >
-        {message.provider && (
-          <span>{modelNames?.[`${message.provider}:${message.model}`] ?? modelNames?.[message.model] ?? message.model}</span>
+        {modelLabel && (
+          <span title={provider ? `${provider}/${modelId}` : undefined}>{modelLabel}</span>
         )}
         {isStreaming && (() => {
           let chars = 0;

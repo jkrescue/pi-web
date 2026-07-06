@@ -3,6 +3,12 @@ import { resolveSessionPath } from "@/lib/session-reader";
 import { startRpcSession, getRpcSession } from "@/lib/rpc-manager";
 import { SessionManager } from "@earendil-works/pi-coding-agent";
 
+function isStaleModelRegistryError(error: unknown, commandType: string | undefined): boolean {
+  if (commandType !== "set_model") return false;
+  const message = error instanceof Error ? error.message : String(error);
+  return message.startsWith("Model not found:");
+}
+
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
   req: Request,
@@ -16,8 +22,15 @@ export async function POST(
     // Fast path: already-running session
     const existing = getRpcSession(id);
     if (existing?.isAlive()) {
-      const result = await existing.send(body);
-      return NextResponse.json({ success: true, data: result });
+      try {
+        const result = await existing.send(body);
+        return NextResponse.json({ success: true, data: result });
+      } catch (error) {
+        if (!isStaleModelRegistryError(error, body.type)) throw error;
+        // A running AgentSession keeps the model registry it was created with.
+        // If models.json changed, rebuild the wrapper and retry set_model once.
+        existing.destroy();
+      }
     }
 
     const filePath = await resolveSessionPath(id);

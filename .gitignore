@@ -32,6 +32,22 @@ yarn-error.log*
 
 # env files (can opt-in for committing if needed)
 .env*
+.env.*.local
+
+# local pi agent configuration and credentials
+.pi/
+.pi-agent/
+auth.json
+models.json
+router.json
+settings.json
+credentials.json
+secrets.json
+
+# local scratch/output files
+tmp/
+temp/
+*.local.json
 
 # vercel
 .vercel

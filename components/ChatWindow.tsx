@@ -5,7 +5,7 @@ import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { MessageView } from "./MessageView";
 import { ChatInput, type ChatInputHandle } from "./ChatInput";
 import { ChatMinimap, useMessageRefs } from "./ChatMinimap";
-import { useAgentSession, type AgentPhase } from "@/hooks/useAgentSession";
+import { useAgentSession, type AgentPhase, type RuntimeStats } from "@/hooks/useAgentSession";
 import { useAudio } from "@/hooks/useAudio";
 import { useDragDrop } from "@/hooks/useDragDrop";
 
@@ -21,6 +21,9 @@ interface Props {
   onSystemPromptChange?: (prompt: string | null) => void;
   onSessionStatsChange?: (stats: { tokens: { input: number; output: number; cacheRead: number; cacheWrite: number }; cost?: number } | null) => void;
   onContextUsageChange?: (usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => void;
+  onRuntimeStatsChange?: (stats: (RuntimeStats & {
+    recentMessages: { index: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
+  }) | null) => void;
 }
 
 function phaseLabel(phase: AgentPhase): string {
@@ -90,12 +93,18 @@ function Typewriter({ phrases }: { phrases: string[] }) {
   );
 }
 
-export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange }: Props) {
+function hasTokenUsage(usage: import("@/lib/types").AssistantMessage["usage"]): boolean {
+  if (!usage) return false;
+  return (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0) > 0;
+}
+
+export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked, modelsRefreshKey, chatInputRef, onBranchDataChange, onSystemPromptChange, onSessionStatsChange, onContextUsageChange, onRuntimeStatsChange }: Props) {
   const {
     loading, error, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
-    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats,
+    isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, runtimeStats,
+    routerMode, routerProfile, lastRouterDecision, activeResponseModel,
     isAutoModelSelection,
     agentPhase,
     isNew,
@@ -104,6 +113,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, handleAgentEventRef,
+    setRouterMode, setRouterProfile,
   } = useAgentSession({
     session, newSessionCwd, onAgentEnd, onSessionCreated, onSessionForked,
     modelsRefreshKey, onBranchDataChange, onSystemPromptChange,
@@ -149,6 +159,32 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
   }, [ctxKey, onContextUsageChange]);
   useEffect(() => () => { onContextUsageChange?.(null); }, [onContextUsageChange]);
 
+  const recentUsage = messages
+    .map((msg, index) => ({ msg, index }))
+    .filter(({ msg }) => msg.role === "assistant" && hasTokenUsage((msg as import("@/lib/types").AssistantMessage).usage))
+    .slice(-5)
+    .map(({ msg, index }) => {
+      const usage = (msg as import("@/lib/types").AssistantMessage).usage!;
+      return {
+        index: index + 1,
+        input: usage.input ?? 0,
+        output: usage.output ?? 0,
+        cacheRead: usage.cacheRead ?? 0,
+        cacheWrite: usage.cacheWrite ?? 0,
+        cost: usage.cost?.total ?? 0,
+      };
+    });
+  const recentUsageKey = recentUsage.map((m) => `${m.index}:${m.input}:${m.output}:${m.cacheRead}:${m.cacheWrite}:${m.cost}`).join("|");
+  const runtimeKey = runtimeStats.lastResponse
+    ? `${runtimeStats.lastResponse.startedAt}|${runtimeStats.lastResponse.endedAt}|${runtimeStats.lastResponse.outputTokens ?? "null"}|${runtimeStats.lastResponse.tokensPerSecond ?? "null"}|${runtimeStats.lastResponse.hasUsage}`
+    : "null";
+  const runtimeStatsRef = useRef({ ...runtimeStats, recentMessages: recentUsage });
+  runtimeStatsRef.current = { ...runtimeStats, recentMessages: recentUsage };
+  useEffect(() => {
+    onRuntimeStatsChange?.(runtimeStatsRef.current);
+  }, [runtimeKey, recentUsageKey, onRuntimeStatsChange]);
+  useEffect(() => () => { onRuntimeStatsChange?.(null); }, [onRuntimeStatsChange]);
+
   const onDrop = useCallback((files: File[]) => {
     chatInputRef?.current?.addImages(files);
   }, [chatInputRef]);
@@ -166,6 +202,10 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
 
   const currentThinkingLevelMap = displayModelValue
     ? (modelThinkingLevelMaps[`${displayModelValue.provider}:${displayModelValue.modelId}`] ?? null)
+    : null;
+
+  const activeResponseModelLabel = activeResponseModel
+    ? (modelNames[`${activeResponseModel.provider}:${activeResponseModel.modelId}`] ?? modelNames[activeResponseModel.modelId] ?? activeResponseModel.modelId)
     : null;
 
   const chatInputElement = (
@@ -193,6 +233,11 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}
+      routerMode={routerMode}
+      routerProfile={routerProfile}
+      routerDecision={lastRouterDecision}
+      onRouterModeChange={setRouterMode}
+      onRouterProfileChange={setRouterProfile}
       soundEnabled={soundEnabled}
       onSoundToggle={onSoundToggle}
     />
@@ -355,11 +400,23 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
             })()}
 
             {streamState.isStreaming && streamState.streamingMessage && (
-              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} />
+              <MessageView message={streamState.streamingMessage as AgentMessage} isStreaming modelNames={modelNames} fallbackModel={activeResponseModel} />
             )}
 
             {agentRunning && !streamState.streamingMessage && (
               <div className="py-2 text-[13px] text-text-muted">
+                {activeResponseModelLabel && (
+                  <div
+                    style={{
+                      fontSize: 11,
+                      color: "var(--text-dim)",
+                      marginBottom: 4,
+                    }}
+                    title={`${activeResponseModel?.provider}/${activeResponseModel?.modelId}`}
+                  >
+                    {activeResponseModelLabel}
+                  </div>
+                )}
                 <span className="animate-[pulse_1.5s_infinite]">{phaseLabel(agentPhase)}</span>
               </div>
             )}

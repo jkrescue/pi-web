@@ -2,6 +2,7 @@
 
 import React, { useRef, useState, useCallback, useEffect, useImperativeHandle, forwardRef, KeyboardEvent } from "react";
 import type { CompactResultInfo } from "@/hooks/useAgentSession";
+import type { RouterDecision } from "@/lib/llm-router";
 
 export interface AttachedImage {
   data: string;   // base64, no prefix
@@ -38,6 +39,11 @@ interface Props {
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  routerMode?: "manual" | "auto";
+  routerProfile?: "cost-saver" | "balanced" | "best-quality";
+  routerDecision?: RouterDecision | null;
+  onRouterModeChange?: (mode: "manual" | "auto") => void;
+  onRouterProfileChange?: (profile: "cost-saver" | "balanced" | "best-quality") => void;
   soundEnabled?: boolean;
   onSoundToggle?: () => void;
 }
@@ -50,6 +56,11 @@ export interface ChatInputHandle {
 
 const TOOL_PRESETS = ["off", "default", "full"] as const;
 const TOOL_PRESET_MAP: Record<"off" | "default" | "full", "none" | "default" | "full"> = { off: "none", default: "default", full: "full" };
+const ROUTER_PROFILES = [
+  { id: "cost-saver", label: "Cost saver", desc: "Qwen 优先，失败再升 Kimi" },
+  { id: "balanced", label: "Balanced", desc: "简单 Qwen，复杂可升级" },
+  { id: "best-quality", label: "Best quality", desc: "复杂任务优先 Kimi" },
+] as const;
 const COMPOSITION_END_ENTER_GRACE_MS = 100;
 const MODEL_OPTION_COLLATOR = new Intl.Collator(undefined, { numeric: true, sensitivity: "base" });
 
@@ -81,11 +92,13 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
   retryInfo,
+  routerMode, routerProfile, routerDecision, onRouterModeChange, onRouterProfileChange,
   soundEnabled, onSoundToggle,
 }: Props, ref) {
   const [value, setValue] = useState("");
   const [modelDropdownOpen, setModelDropdownOpen] = useState(false);
   const [modelDropdownRect, setModelDropdownRect] = useState<{ top: number; left: number; width: number } | null>(null);
+  const [routerDropdownOpen, setRouterDropdownOpen] = useState(false);
   const [toolDropdownOpen, setToolDropdownOpen] = useState(false);
   const [thinkingDropdownOpen, setThinkingDropdownOpen] = useState(false);
   const [attachedImages, setAttachedImages] = useState<AttachedImage[]>([]);
@@ -93,6 +106,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const textareaRef = useRef<HTMLTextAreaElement>(null);
   const dropdownRef = useRef<HTMLDivElement>(null);
   const modelDropdownPanelRef = useRef<HTMLDivElement>(null);
+  const routerDropdownRef = useRef<HTMLDivElement>(null);
   const toolDropdownRef = useRef<HTMLDivElement>(null);
   const thinkingDropdownRef = useRef<HTMLDivElement>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
@@ -281,6 +295,12 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   const compactResultText = compactResult
     ? `${compactVerb} ${formatTokenCount(compactResult.tokensBefore)} -> ${formatTokenCount(compactResult.estimatedTokensAfter)} tokens (${formatTokenCount(compactSavedTokens)} saved)`
     : null;
+  const activeRouterProfile = ROUTER_PROFILES.find((p) => p.id === (routerProfile ?? "balanced")) ?? ROUTER_PROFILES[1];
+  const effectiveRouterMode = routerMode ?? "manual";
+  const isRouterAuto = effectiveRouterMode === "auto";
+  const routerTitle = routerMode === "auto"
+    ? (routerDecision?.reason ?? `Auto router: ${activeRouterProfile.label}`)
+    : "Manual model selection";
 
   // Close dropdowns on outside click
   useEffect(() => {
@@ -293,6 +313,9 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
       }
       if (toolDropdownRef.current && !toolDropdownRef.current.contains(e.target as Node)) {
         setToolDropdownOpen(false);
+      }
+      if (routerDropdownRef.current && !routerDropdownRef.current.contains(e.target as Node)) {
+        setRouterDropdownOpen(false);
       }
       if (thinkingDropdownRef.current && !thinkingDropdownRef.current.contains(e.target as Node)) {
         setThinkingDropdownOpen(false);
@@ -571,20 +594,21 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                       background: modelDropdownOpen ? "var(--bg-hover)" : "none",
                       border: "none",
                       borderRadius: 9,
-                      color: "var(--text-muted)",
+                      color: isRouterAuto ? "var(--text-dim)" : "var(--accent)",
                       cursor: isStreaming ? "not-allowed" : "pointer",
                       fontSize: 12,
-                      opacity: isStreaming ? 0.5 : 1,
+                      fontWeight: isRouterAuto ? 400 : 600,
+                      opacity: isStreaming ? 0.5 : isRouterAuto ? 0.55 : 1,
                       transition: "background 0.12s, color 0.12s",
                     }}
                     onMouseEnter={(e) => {
                       if (isStreaming) return;
                       e.currentTarget.style.background = "var(--bg-hover)";
-                      e.currentTarget.style.color = "var(--text)";
+                      e.currentTarget.style.color = isRouterAuto ? "var(--text-muted)" : "var(--accent)";
                     }}
                     onMouseLeave={(e) => {
                       e.currentTarget.style.background = modelDropdownOpen ? "var(--bg-hover)" : "none";
-                      e.currentTarget.style.color = "var(--text-muted)";
+                      e.currentTarget.style.color = isRouterAuto ? "var(--text-dim)" : "var(--accent)";
                     }}
                   >
                     <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
@@ -626,22 +650,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                             return (
                               <button
                                 key={`${opt.provider}:${opt.modelId}`}
-                                onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection) onModelChange(opt.provider, opt.modelId); }}
+                                onClick={() => { setModelDropdownOpen(false); if (!isActive || isAutoModelSelection || routerMode === "auto") onModelChange(opt.provider, opt.modelId); }}
                                 style={{
                                   display: "flex", alignItems: "center", gap: 8,
                                   width: "100%", padding: "7px 12px",
-                                  background: isActive ? "var(--bg-selected)" : "none",
+                                  background: isActive && !isRouterAuto ? "rgba(37,99,235,0.10)" : isActive ? "var(--bg-selected)" : "none",
                                   border: "none",
-                                  color: isActive ? "var(--text)" : "var(--text-muted)",
+                                  color: isActive && !isRouterAuto ? "var(--accent)" : isActive ? "var(--text-dim)" : "var(--text-muted)",
                                   cursor: "pointer", fontSize: 12, textAlign: "left",
-                                  fontWeight: isActive ? 600 : 400,
+                                  fontWeight: isActive && !isRouterAuto ? 700 : isActive ? 500 : 400,
+                                  opacity: isRouterAuto ? 0.62 : 1,
                                   whiteSpace: "nowrap",
                                 }}
                                 onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
                                 onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
                               >
                                 {isActive
-                                  ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                                  ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke={isRouterAuto ? "var(--text-dim)" : "var(--accent)"} strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
                                   : <span style={{ width: 10, flexShrink: 0 }} />}
                                 {opt.name}
                               </button>
@@ -653,6 +678,126 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
                     );
                   })()}
                 </div>
+            )}
+            {onRouterModeChange && onRouterProfileChange && (
+              <div ref={routerDropdownRef} style={{ position: "relative" }}>
+                <button
+                  onClick={() => !isStreaming && setRouterDropdownOpen((v) => !v)}
+                  disabled={isStreaming}
+                  title={routerTitle}
+                  style={{
+                    display: "flex", alignItems: "center", gap: 6,
+                    padding: "8px 12px",
+                    height: 32,
+                    maxWidth: 190,
+                    overflow: "hidden",
+                    background: routerDropdownOpen ? "var(--bg-hover)" : "none",
+                    border: "none",
+                    borderRadius: 9,
+                    color: effectiveRouterMode === "auto" ? "var(--accent)" : "var(--accent)",
+                    cursor: isStreaming ? "not-allowed" : "pointer",
+                    fontSize: 12,
+                    fontWeight: 600,
+                    opacity: isStreaming ? 0.5 : 1,
+                    transition: "background 0.12s, color 0.12s",
+                  }}
+                  onMouseEnter={(e) => {
+                    if (isStreaming) return;
+                    e.currentTarget.style.background = "var(--bg-hover)";
+                    e.currentTarget.style.color = "var(--accent)";
+                  }}
+                  onMouseLeave={(e) => {
+                    e.currentTarget.style.background = routerDropdownOpen ? "var(--bg-hover)" : "none";
+                    e.currentTarget.style.color = "var(--accent)";
+                  }}
+                >
+                  <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round">
+                    <path d="M3 6h5l2 3h11" />
+                    <path d="M3 18h5l2-3h11" />
+                    <circle cx="17" cy="9" r="2" />
+                    <circle cx="7" cy="15" r="2" />
+                  </svg>
+                  <span style={{ overflow: "hidden", textOverflow: "ellipsis", whiteSpace: "nowrap" }}>
+                    {effectiveRouterMode === "auto" ? `Auto · ${activeRouterProfile.label}` : "Manual"}
+                  </span>
+                </button>
+                {routerDropdownOpen && (
+                  <div style={{
+                    position: "absolute", bottom: "calc(100% + 6px)", left: 0,
+                    zIndex: 120, background: "var(--bg)", border: "1px solid var(--border)",
+                    borderRadius: 8, boxShadow: "0 -4px 16px rgba(0,0,0,0.10)",
+                    overflow: "hidden", minWidth: 230,
+                  }}>
+                    {(["manual", "auto"] as const).map((mode) => {
+                      const isActive = effectiveRouterMode === mode;
+                      return (
+                        <button
+                          key={mode}
+                          onClick={() => { onRouterModeChange(mode); if (mode === "manual") setRouterDropdownOpen(false); }}
+                          style={{
+                            display: "flex", alignItems: "center", gap: 8,
+                            width: "100%", padding: "8px 12px",
+                            background: isActive ? "rgba(37,99,235,0.10)" : "none",
+                            border: "none",
+                            color: isActive ? "var(--accent)" : "var(--text-muted)",
+                            cursor: "pointer", fontSize: 12, textAlign: "left",
+                            fontWeight: isActive ? 700 : 400,
+                          }}
+                          onMouseEnter={(e) => { if (!isActive) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                          onMouseLeave={(e) => { if (!isActive) e.currentTarget.style.background = "none"; }}
+                        >
+                          {isActive
+                            ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                            : <span style={{ width: 10, flexShrink: 0 }} />}
+                          <span style={{ flex: 1 }}>{mode === "auto" ? "Auto router" : "Manual model"}</span>
+                          <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{mode === "auto" ? "按成本/复杂度选模" : "沿用模型下拉框"}</span>
+                        </button>
+                      );
+                    })}
+                    <div style={{ borderTop: "1px solid var(--border)", padding: "5px 0" }}>
+                      {ROUTER_PROFILES.map((profile) => {
+                        const isActive = (routerProfile ?? "balanced") === profile.id;
+                        return (
+                          <button
+                            key={profile.id}
+                            onClick={() => { onRouterProfileChange(profile.id); onRouterModeChange("auto"); setRouterDropdownOpen(false); }}
+                            style={{
+                              display: "flex", alignItems: "center", gap: 8,
+                              width: "100%", padding: "7px 12px",
+                              background: isActive && effectiveRouterMode === "auto" ? "rgba(37,99,235,0.10)" : "none",
+                              border: "none",
+                              color: isActive && effectiveRouterMode === "auto" ? "var(--accent)" : "var(--text-muted)",
+                              cursor: "pointer", fontSize: 12, textAlign: "left",
+                              fontWeight: isActive && effectiveRouterMode === "auto" ? 700 : 400,
+                            }}
+                            onMouseEnter={(e) => { if (!(isActive && effectiveRouterMode === "auto")) e.currentTarget.style.background = "var(--bg-hover)"; }}
+                            onMouseLeave={(e) => { if (!(isActive && effectiveRouterMode === "auto")) e.currentTarget.style.background = "none"; }}
+                          >
+                            {isActive && effectiveRouterMode === "auto"
+                              ? <svg width="10" height="10" viewBox="0 0 10 10" fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}><polyline points="1.5 5 4 7.5 8.5 2.5" /></svg>
+                              : <span style={{ width: 10, flexShrink: 0 }} />}
+                            <span style={{ flex: 1 }}>{profile.label}</span>
+                            <span style={{ fontSize: 11, color: "var(--text-dim)", marginLeft: 8 }}>{profile.desc}</span>
+                          </button>
+                        );
+                      })}
+                    </div>
+                    {routerDecision && (
+                      <div style={{
+                        borderTop: "1px solid var(--border)",
+                        padding: "7px 12px",
+                        fontSize: 11,
+                        color: "var(--text-dim)",
+                        lineHeight: 1.4,
+                      }}>
+                        Last route: <span style={{ color: "var(--text-muted)" }}>{routerDecision.tier}</span>
+                        {" · "}
+                        <span>{routerDecision.reason}</span>
+                      </div>
+                    )}
+                  </div>
+                )}
+              </div>
             )}
           </div>
 

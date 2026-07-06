@@ -1,6 +1,6 @@
 "use client";
 
-import { useState, useCallback, useRef, useEffect } from "react";
+import { Fragment, useState, useCallback, useRef, useEffect } from "react";
 import { useRouter, useSearchParams } from "next/navigation";
 import { SessionSidebar } from "./SessionSidebar";
 import { ChatWindow } from "./ChatWindow";
@@ -12,6 +12,18 @@ import { BranchNavigator } from "./BranchNavigator";
 import { useTheme } from "@/hooks/useTheme";
 import type { SessionInfo, SessionTreeNode } from "@/lib/types";
 import type { ChatInputHandle } from "./ChatInput";
+
+type RuntimeStatsState = {
+  lastResponse: {
+    startedAt: number;
+    endedAt: number;
+    durationMs: number;
+    outputTokens: number | null;
+    tokensPerSecond: number | null;
+    hasUsage: boolean;
+  } | null;
+  recentMessages: { index: number; input: number; output: number; cacheRead: number; cacheWrite: number; cost: number }[];
+};
 
 export function AppShell() {
   const router = useRouter();
@@ -63,12 +75,16 @@ export function AppShell() {
   const handleContextUsageChange = useCallback((usage: { percent: number | null; contextWindow: number; tokens: number | null } | null) => {
     setContextUsage(usage);
   }, []);
+  const [runtimeStats, setRuntimeStats] = useState<RuntimeStatsState | null>(null);
+  const handleRuntimeStatsChange = useCallback((stats: RuntimeStatsState | null) => {
+    setRuntimeStats(stats);
+  }, []);
 
   // Single active panel — only one dropdown open at a time
-  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | null>(null);
+  const [activeTopPanel, setActiveTopPanel] = useState<"branches" | "system" | "stats" | null>(null);
   const [topPanelPos, setTopPanelPos] = useState<{ top: number; left: number; width: number } | null>(null);
 
-  const toggleTopPanel = useCallback((panel: "branches" | "system") => {
+  const toggleTopPanel = useCallback((panel: "branches" | "system" | "stats") => {
     setActiveTopPanel((cur) => cur === panel ? null : panel);
   }, []);
 
@@ -481,6 +497,31 @@ export function AppShell() {
                 </svg>
                 <span>System</span>
               </button>
+              <button
+                onClick={() => toggleTopPanel("stats")}
+                style={{
+                  display: "flex", alignItems: "center", gap: 6,
+                  height: "100%", padding: "0 12px",
+                  background: activeTopPanel === "stats" ? "var(--bg-selected)" : "none",
+                  border: "none",
+                  borderTop: activeTopPanel === "stats" ? "2px solid var(--accent)" : "2px solid transparent",
+                  borderRight: "1px solid var(--border)",
+                  cursor: "pointer",
+                  color: activeTopPanel === "stats" ? "var(--text)" : "var(--text-muted)",
+                  fontSize: 11, whiteSpace: "nowrap", transition: "color 0.1s, background 0.1s",
+                }}
+                onMouseEnter={(e) => { e.currentTarget.style.color = "var(--text)"; }}
+                onMouseLeave={(e) => { e.currentTarget.style.color = activeTopPanel === "stats" ? "var(--text)" : "var(--text-muted)"; }}
+              >
+                <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ color: sessionStats ? "var(--accent)" : "var(--text-dim)", flexShrink: 0 }}>
+                  <path d="M4 19V5" />
+                  <path d="M4 19h16" />
+                  <rect x="7" y="11" width="3" height="5" rx="1" />
+                  <rect x="12" y="8" width="3" height="8" rx="1" />
+                  <rect x="17" y="4" width="3" height="12" rx="1" />
+                </svg>
+                <span>Stats</span>
+              </button>
             </div>
           )}
           {/* Session stats — right-aligned in top bar */}
@@ -605,6 +646,133 @@ export function AppShell() {
                   )}
                 </div>
               )}
+              {activeTopPanel === "stats" && (() => {
+                const fmt = (n: number) => n.toLocaleString();
+                const fmtTokens = (n: number) => `${fmt(n)} tokens`;
+                const fmtCost = (n: number) => n > 0 ? `$${n.toFixed(4)}` : "—";
+                const fmtDuration = (ms: number) => ms < 1000 ? `${Math.max(1, Math.round(ms))} ms` : `${(ms / 1000).toFixed(1)} s`;
+                const totalTokens = sessionStats
+                  ? sessionStats.tokens.input + sessionStats.tokens.output + sessionStats.tokens.cacheRead + sessionStats.tokens.cacheWrite
+                  : 0;
+                const last = runtimeStats?.lastResponse ?? null;
+                const statRow = (label: string, value: React.ReactNode, tone: "normal" | "muted" | "accent" = "normal") => (
+                  <div style={{ display: "grid", gridTemplateColumns: "minmax(104px, max-content) minmax(0, 1fr)", columnGap: 14, fontSize: 12, lineHeight: 1.7 }}>
+                    <span style={{ color: "var(--text-muted)" }}>{label}</span>
+                    <span style={{
+                      color: tone === "accent" ? "var(--accent)" : tone === "muted" ? "var(--text-dim)" : "var(--text)",
+                      fontFamily: "var(--font-mono)",
+                      fontVariantNumeric: "tabular-nums",
+                      textAlign: "left",
+                    }}>
+                      {value}
+                    </span>
+                  </div>
+                );
+                const tokenCell = (value: number) => (
+                  <span style={{ color: "var(--text)" }}>
+                    <span style={{ fontWeight: 500 }}>{fmt(value)}</span>{" "}
+                    <span style={{ color: "var(--text-muted)", fontWeight: 400 }}>tokens</span>
+                  </span>
+                );
+                const sectionTitle = (label: string) => (
+                  <div style={{ fontSize: 11, color: "var(--text-dim)", textTransform: "uppercase", letterSpacing: "0.04em", marginBottom: 6 }}>
+                    {label}
+                  </div>
+                );
+                const sectionStyle = { minWidth: 0 };
+
+                return (
+                  <div style={{
+                    background: "var(--bg-panel)",
+                    borderBottom: "1px solid var(--border)",
+                    padding: "14px 16px",
+                  }}>
+                    <div style={{ display: "grid", gridTemplateColumns: "repeat(4, minmax(220px, 1fr))", columnGap: 28, maxWidth: 1280 }}>
+                      <div style={sectionStyle}>
+                        {sectionTitle("Session totals")}
+                        {sessionStats ? (
+                          <>
+                            {statRow("Input tokens", fmtTokens(sessionStats.tokens.input))}
+                            {statRow("Output tokens", fmtTokens(sessionStats.tokens.output))}
+                            {statRow("Cache read", fmtTokens(sessionStats.tokens.cacheRead), sessionStats.tokens.cacheRead ? "normal" : "muted")}
+                            {statRow("Cache write", fmtTokens(sessionStats.tokens.cacheWrite), sessionStats.tokens.cacheWrite ? "normal" : "muted")}
+                            {statRow("Total tokens", fmtTokens(totalTokens), "accent")}
+                            {statRow("Cost (USD)", fmtCost(sessionStats.cost ?? 0))}
+                          </>
+                        ) : (
+                          <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.6 }}>
+                            Token usage unavailable or returned as zero by this provider.
+                          </div>
+                        )}
+                      </div>
+                      <div style={sectionStyle}>
+                        {sectionTitle("Context")}
+                        {contextUsage ? (
+                          <>
+                            {statRow("Current context", contextUsage.tokens !== null ? fmtTokens(contextUsage.tokens) : "unknown")}
+                            {statRow("Context window", fmtTokens(contextUsage.contextWindow))}
+                            {statRow("Window usage", contextUsage.percent !== null ? `${contextUsage.percent.toFixed(1)}%` : "unknown", contextUsage.percent !== null && contextUsage.percent > 70 ? "accent" : "normal")}
+                          </>
+                        ) : (
+                          <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.6 }}>
+                            Context usage appears after a live session starts.
+                          </div>
+                        )}
+                      </div>
+                      <div style={sectionStyle}>
+                        {sectionTitle("Last response")}
+                        {last ? (
+                          <>
+                            {statRow("Output tokens", last.outputTokens !== null ? fmtTokens(last.outputTokens) : "unavailable")}
+                            {statRow("Duration", fmtDuration(last.durationMs))}
+                            {statRow("Generation speed", last.tokensPerSecond !== null ? `${last.tokensPerSecond.toFixed(1)} tokens/s` : "unavailable", last.tokensPerSecond !== null ? "accent" : "muted")}
+                          </>
+                        ) : (
+                          <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.6 }}>
+                            Send a message to measure response throughput.
+                          </div>
+                        )}
+                      </div>
+                      <div style={sectionStyle}>
+                        {sectionTitle("Recent messages")}
+                        {runtimeStats?.recentMessages.length ? (
+                          <div style={{
+                            display: "grid",
+                            gridTemplateColumns: "42px minmax(90px, 1fr) minmax(90px, 1fr) 48px",
+                            columnGap: 12,
+                            rowGap: 4,
+                            color: "var(--text-muted)",
+                            fontSize: 12,
+                            fontFamily: "var(--font-mono)",
+                            fontVariantNumeric: "tabular-nums",
+                            whiteSpace: "nowrap",
+                          }}>
+                            <span style={{ color: "var(--text-dim)" }}>Msg</span>
+                            <span style={{ color: "var(--text-dim)" }}>Input</span>
+                            <span style={{ color: "var(--text-dim)" }}>Output</span>
+                            <span style={{ color: "var(--text-dim)" }}>Cost</span>
+                            {runtimeStats.recentMessages.map((msg) => (
+                              <Fragment key={msg.index}>
+                                <span style={{ color: "var(--text-muted)" }}>#{msg.index}</span>
+                                {tokenCell(msg.input)}
+                                {tokenCell(msg.output)}
+                                <span style={{ color: msg.cost > 0 ? "var(--text)" : "var(--text-muted)", fontWeight: msg.cost > 0 ? 500 : 400 }}>{fmtCost(msg.cost)}</span>
+                              </Fragment>
+                            ))}
+                          </div>
+                        ) : (
+                          <div style={{ color: "var(--text-muted)", fontSize: 12, lineHeight: 1.6 }}>
+                            No assistant messages with non-zero usage yet.
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                    <div style={{ marginTop: 12, color: "var(--text-dim)", fontSize: 11, lineHeight: 1.5, maxWidth: 1280 }}>
+                      Input tokens include the system prompt, conversation history, tool definitions, and your latest message. Output tokens are generated by the model. Context shows how much of the model window is currently occupied.
+                    </div>
+                  </div>
+                );
+              })()}
             </div>
           )}
 
@@ -626,6 +794,7 @@ export function AppShell() {
               onSystemPromptChange={handleSystemPromptChange}
               onSessionStatsChange={handleSessionStatsChange}
               onContextUsageChange={handleContextUsageChange}
+              onRuntimeStatsChange={handleRuntimeStatsChange}
             />
           ) : showPlaceholder ? (
             activeCwd ? (

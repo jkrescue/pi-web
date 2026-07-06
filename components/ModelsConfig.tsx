@@ -488,7 +488,6 @@ const DEEPSEEK_COMPAT = {
 const NIM_STRICT_COMPAT = {
   supportsDeveloperRole: false,
   supportsReasoningEffort: false,
-  supportsUsageInStreaming: false,
   supportsStore: false,
   supportsStrictMode: false,
   supportsLongCacheRetention: false,
@@ -522,6 +521,20 @@ function setNimStrictCompat(model: ModelEntry, enabled: boolean): ModelEntry {
   const rest = { ...model.compat };
   for (const key of Object.keys(NIM_STRICT_COMPAT)) {
     delete rest[key];
+  }
+  return { ...model, compat: Object.keys(rest).length ? rest : undefined };
+}
+
+function hasStreamingUsageCompat(model: ModelEntry): boolean {
+  return model.compat?.supportsUsageInStreaming !== false;
+}
+
+function setStreamingUsageCompat(model: ModelEntry, enabled: boolean): ModelEntry {
+  const rest = { ...(model.compat ?? {}) };
+  if (enabled) {
+    rest.supportsUsageInStreaming = true;
+  } else {
+    rest.supportsUsageInStreaming = false;
   }
   return { ...model, compat: Object.keys(rest).length ? rest : undefined };
 }
@@ -678,6 +691,11 @@ function ModelDetail({
           label="NIM / strict OpenAI-compatible compat"
           checked={hasNimStrictCompat(model)}
           onChange={(v) => onChange(setNimStrictCompat(model, v))}
+        />
+        <Check
+          label="Request streaming usage for token stats"
+          checked={hasStreamingUsageCompat(model)}
+          onChange={(v) => onChange(setStreamingUsageCompat(model, v))}
         />
       </div>
 

@@ -5,6 +5,7 @@ import type { AgentMessage, SessionInfo, SessionTreeNode } from "@/lib/types";
 import { normalizeToolCalls } from "@/lib/normalize";
 import { sendAgentCommand } from "@/lib/agent-client";
 import type { ToolEntry } from "@/components/ToolPanel";
+import type { RouterDecision } from "@/lib/llm-router";
 
 export interface SessionData {
   sessionId: string;
@@ -59,6 +60,17 @@ export type AgentPhase =
   | { kind: "running_tools"; tools: { id: string; name: string }[] }
   | null;
 
+export interface RuntimeStats {
+  lastResponse: {
+    startedAt: number;
+    endedAt: number;
+    durationMs: number;
+    outputTokens: number | null;
+    tokensPerSecond: number | null;
+    hasUsage: boolean;
+  } | null;
+}
+
 export interface CompactResultInfo {
   reason: "manual" | "threshold" | "overflow" | "auto" | string;
   tokensBefore: number;
@@ -105,6 +117,8 @@ export interface AttachedImage {
 
 type SelectedModel = { provider: string; modelId: string };
 type ModelEntry = { id: string; name: string; provider: string };
+export type RouterModeOption = "manual" | "auto";
+export type RouterProfileOption = "cost-saver" | "balanced" | "best-quality";
 type ModelsResponse = {
   models: Record<string, string>;
   modelList?: ModelEntry[];
@@ -143,10 +157,23 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [forkingEntryId, setForkingEntryId] = useState<string | null>(null);
   const [currentModelOverride, setCurrentModelOverride] = useState<{ provider: string; modelId: string } | null>(null);
   const [pendingModel, setPendingModel] = useState<{ provider: string; modelId: string } | null>(null);
+  const [activeResponseModel, setActiveResponseModel] = useState<{ provider: string; modelId: string } | null>(null);
   const [isCompacting, setIsCompacting] = useState(false);
   const [compactError, setCompactError] = useState<string | null>(null);
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
+  const [runtimeStats, setRuntimeStats] = useState<RuntimeStats>({ lastResponse: null });
+  const [routerMode, setRouterMode] = useState<RouterModeOption>(() => {
+    if (typeof window === "undefined") return "manual";
+    return window.localStorage.getItem("pi-web-router-mode") === "auto" ? "auto" : "manual";
+  });
+  const [routerProfile, setRouterProfile] = useState<RouterProfileOption>(() => {
+    if (typeof window === "undefined") return "balanced";
+    const stored = window.localStorage.getItem("pi-web-router-profile");
+    return stored === "cost-saver" || stored === "best-quality" || stored === "balanced" ? stored : "balanced";
+  });
+  const [lastRouterDecision, setLastRouterDecision] = useState<RouterDecision | null>(null);
+  const lastRouterDecisionRef = useRef<RouterDecision | null>(null);
 
   const eventSourceRef = useRef<EventSource | null>(null);
   const sessionIdRef = useRef<string | null>(session?.id ?? null);
@@ -160,11 +187,22 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const ignoreProgrammaticScrollUntilRef = useRef(0);
   const messagesEndRef = useRef<HTMLDivElement | null>(null);
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
+  const responseStartedAtRef = useRef<number | null>(null);
+  const activeResponseModelRef = useRef<{ provider: string; modelId: string } | null>(null);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
   const currentModel = currentModelOverride ?? data?.context.model ?? pendingModel ?? null;
   const displayModel = isNew ? (newSessionModel ?? newSessionDefaultModel) : currentModel;
+
+  const setLiveResponseModel = useCallback((model: { provider: string; modelId: string } | null) => {
+    activeResponseModelRef.current = model;
+    setActiveResponseModel(model);
+  }, []);
+
+  useEffect(() => {
+    activeResponseModelRef.current = activeResponseModel;
+  }, [activeResponseModel]);
 
   const sessionStats = (() => {
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -247,6 +285,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     }
   }, [setToolPresetState]);
 
+  useEffect(() => {
+    window.localStorage.setItem("pi-web-router-mode", routerMode);
+  }, [routerMode]);
+
+  useEffect(() => {
+    window.localStorage.setItem("pi-web-router-profile", routerProfile);
+  }, [routerProfile]);
+
   const connectEvents = useCallback((sid: string) => {
     if (eventSourceRef.current) {
       eventSourceRef.current.close();
@@ -280,6 +326,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "agent_start":
+        responseStartedAtRef.current = responseStartedAtRef.current ?? Date.now();
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -289,6 +336,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         agentRunningRef.current = false;
         setAgentRunning(false);
         setAgentPhase(null);
+        responseStartedAtRef.current = null;
+        setLiveResponseModel(null);
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
@@ -306,21 +355,69 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       case "message_start":
       case "message_update": {
         const msg = event.message as Partial<AgentMessage> | undefined;
+        if (msg?.role === "assistant") {
+          responseStartedAtRef.current = responseStartedAtRef.current ?? Date.now();
+        }
         if (msg?.role === "user") {
           break;
         }
         if (msg) {
-          dispatch({ type: "update", message: normalizeToolCalls(msg as AgentMessage) });
+          const normalized = normalizeToolCalls(msg as AgentMessage);
+          if (normalized.role === "assistant") {
+            const model = activeResponseModelRef.current;
+            const assistant = normalized as import("@/lib/types").AssistantMessage;
+            dispatch({
+              type: "update",
+              message: model && (!assistant.provider || !assistant.model)
+                ? { ...assistant, provider: assistant.provider ?? model.provider, model: assistant.model ?? model.modelId }
+                : normalized,
+            });
+          } else {
+            dispatch({ type: "update", message: normalized });
+          }
         }
         setAgentPhase(null);
         break;
       }
       case "message_end": {
         const completed = event.message as AgentMessage | undefined;
+        if (completed?.role === "assistant") {
+          const endedAt = Date.now();
+          const startedAt = responseStartedAtRef.current ?? endedAt;
+          const durationMs = Math.max(0, endedAt - startedAt);
+          const usage = (completed as import("@/lib/types").AssistantMessage).usage;
+          const usageTotal = usage
+            ? (usage.input ?? 0) + (usage.output ?? 0) + (usage.cacheRead ?? 0) + (usage.cacheWrite ?? 0)
+            : 0;
+          const outputTokens = typeof usage?.output === "number" && usage.output > 0 ? usage.output : null;
+          const seconds = durationMs / 1000;
+          setRuntimeStats({
+            lastResponse: {
+              startedAt,
+              endedAt,
+              durationMs,
+              outputTokens,
+              tokensPerSecond: outputTokens !== null && seconds > 0 ? outputTokens / seconds : null,
+              hasUsage: usageTotal > 0,
+            },
+          });
+          const assistant = completed as import("@/lib/types").AssistantMessage;
+          if (assistant.provider && assistant.model) {
+            setCurrentModelOverride({ provider: assistant.provider, modelId: assistant.model });
+          }
+          const upgrade = lastRouterDecisionRef.current?.upgradeModel;
+          const sid = sessionIdRef.current;
+          if (sid && upgrade && (assistant.stopReason === "error" || assistant.errorMessage)) {
+            sendAgentCommand(sid, { type: "set_model", provider: upgrade.provider, modelId: upgrade.modelId })
+              .then(() => setCurrentModelOverride({ provider: upgrade.provider, modelId: upgrade.modelId }))
+              .catch((e) => console.error("Failed to auto-upgrade model:", e));
+          }
+        }
         if (completed && completed.role !== "user") {
           setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
         }
         dispatch({ type: "reset" });
+        setLiveResponseModel(null);
         setAgentPhase({ kind: "waiting_model" });
         break;
       }
@@ -368,14 +465,49 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd]);
+  }, [loadSession, onAgentEnd, setLiveResponseModel]);
   handleAgentEventRef.current = handleAgentEvent;
+
+  const routeForMessage = useCallback(async (message: string, hasImages: boolean): Promise<RouterDecision | null> => {
+    if (routerMode !== "auto") {
+      setLastRouterDecision(null);
+      lastRouterDecisionRef.current = null;
+      return null;
+    }
+    const cwd = newSessionCwd ?? session?.cwd;
+    if (!cwd) return null;
+    try {
+      const res = await fetch("/api/router/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cwd,
+          message,
+          hasImages,
+          currentModel: displayModel,
+          profile: routerProfile,
+          contextTokens: contextUsage?.tokens ?? null,
+        }),
+      });
+      const body = (await res.json()) as { decision?: RouterDecision | null; error?: string };
+      if (!res.ok || body.error) throw new Error(body.error ?? `HTTP ${res.status}`);
+      setLastRouterDecision(body.decision ?? null);
+      lastRouterDecisionRef.current = body.decision ?? null;
+      return body.decision ?? null;
+    } catch (e) {
+      console.error("LLM router failed:", e);
+      setLastRouterDecision(null);
+      lastRouterDecisionRef.current = null;
+      return null;
+    }
+  }, [contextUsage?.tokens, displayModel, newSessionCwd, routerMode, routerProfile, session?.cwd]);
 
   const handleSend = useCallback(async (message: string, images?: AttachedImage[]) => {
     if (!message.trim() && !images?.length) return;
     if (agentRunning) return;
 
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
+    responseStartedAtRef.current = Date.now();
     const userMsg: AgentMessage = {
       role: "user",
       content: imageBlocks?.length
@@ -394,9 +526,13 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
 
     try {
+      const routeDecision = await routeForMessage(message, Boolean(piImages?.length));
       if (isNew && newSessionCwd) {
-        const selectedModel = newSessionModel;
+        const selectedModel = routeDecision
+          ? { provider: routeDecision.provider, modelId: routeDecision.modelId }
+          : newSessionModel;
         if (selectedModel) setPendingModel(selectedModel);
+        setLiveResponseModel(selectedModel ?? null);
         const { PRESET_NONE, PRESET_DEFAULT, PRESET_FULL } = await import("@/components/ToolPanel");
         const toolNames = toolPreset === "none" ? PRESET_NONE : toolPreset === "default" ? PRESET_DEFAULT : PRESET_FULL;
         const res = await fetch("/api/agent/new", {
@@ -429,6 +565,14 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
       } else if (session) {
         connectEvents(session.id);
+        const responseModel = routeDecision
+          ? { provider: routeDecision.provider, modelId: routeDecision.modelId }
+          : currentModel;
+        if (routeDecision?.changed) {
+          await sendAgentCommand(session.id, { type: "set_model", provider: routeDecision.provider, modelId: routeDecision.modelId });
+          setCurrentModelOverride({ provider: routeDecision.provider, modelId: routeDecision.modelId });
+        }
+        setLiveResponseModel(responseModel ?? null);
         await sendAgentCommand(session.id, {
           type: "prompt",
           message,
@@ -441,8 +585,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
       setAgentRunning(false);
       setAgentPhase(null);
       dispatch({ type: "end" });
+      setLiveResponseModel(null);
     }
-  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated]);
+  }, [isNew, newSessionCwd, newSessionModel, toolPreset, thinkingLevel, session, agentRunning, connectEvents, onSessionCreated, routeForMessage, currentModel, setLiveResponseModel]);
 
   const handleAbort = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -493,6 +638,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   }, [loadContext]);
 
   const handleModelChange = useCallback(async (provider: string, modelId: string) => {
+    setRouterMode("manual");
+    setLastRouterDecision(null);
+    lastRouterDecisionRef.current = null;
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       return;
@@ -502,10 +650,11 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     try {
       await sendAgentCommand(sid, { type: "set_model", provider, modelId });
       setCurrentModelOverride({ provider, modelId });
+      setLiveResponseModel(null);
     } catch (e) {
       console.error("Failed to set model:", e);
     }
-  }, [isNew, setNewSessionModel]);
+  }, [isNew, setNewSessionModel, setLiveResponseModel]);
 
   const handleCompact = useCallback(async () => {
     const sid = sessionIdRef.current;
@@ -740,7 +889,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     data, loading, error, activeLeafId, messages, entryIds, streamState,
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
-    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats,
+    isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats, runtimeStats,
+    routerMode, routerProfile, lastRouterDecision, activeResponseModel,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,
@@ -751,6 +901,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     handleSend, handleAbort, handleFork, handleNavigate, handleModelChange,
     handleCompact, handleSteer, handleFollowUp, handleAbortCompaction,
     handleToolPresetChange, handleThinkingLevelChange, loadTools, setActiveLeafId, setData, setMessages,
+    setRouterMode, setRouterProfile,
     dispatch, setAgentRunning, setForkingEntryId,
     // Subscriptions
     handleAgentEventRef,

@@ -53,8 +53,13 @@ export async function GET(req: Request) {
     const settings: SettingsManager = services.settingsManager;
     const provider = settings.getDefaultProvider();
     const modelId = settings.getDefaultModel();
-    if (provider && modelId && available.some((m) => m.provider === provider && m.id === modelId)) {
-      defaultModel = { provider, modelId };
+    if (provider && modelId) {
+      const exactDefault = available.find((m) => m.provider === provider && m.id === modelId);
+      const renamedDefaults = available.filter((m) => m.id === modelId);
+      const resolvedDefault = exactDefault ?? (renamedDefaults.length === 1 ? renamedDefaults[0] : null);
+      if (resolvedDefault) {
+        defaultModel = { provider: resolvedDefault.provider, modelId: resolvedDefault.id };
+      }
     }
   } catch { /* return empty */ }
 
