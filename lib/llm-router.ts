@@ -94,11 +94,11 @@ export const DEFAULT_ROUTER_CONFIG: RouterConfig = {
       label: "Balanced",
       description: "Use local/free models for simple and standard work; allow cloud upgrade for complex work.",
       policy: "balanced",
-      upgradeTiers: ["complex"],
+      upgradeTiers: ["complex", "reasoning"],
       preferences: {
         simple: ["qwen", "local", "mini", "flash", "haiku", "lite", "small"],
         standard: ["qwen", "local", "kimi", "sonnet", "gpt-4.1", "gpt-4o"],
-        complex: ["qwen", "local", "kimi", "sonnet", "opus", "gpt-5", "gpt-4.1"],
+        complex: ["kimi", "sonnet", "opus", "gpt-5", "gpt-4.1", "gpt-4o", "deepseek"],
         reasoning: ["kimi", "reasoning", "o3", "o1", "opus", "sonnet", "gpt-5"],
         vision: ["kimi", "gpt-4o", "gemini", "claude", "vision", "multimodal"],
       },
@@ -296,13 +296,35 @@ function classifyTier(message: string, hasImages: boolean, contextTokens?: numbe
     /\b(summarize|translate|explain|what is|how do i|quick|simple)\b/,
     /总结|翻译|解释|简单|快速/,
   ]);
+  const researchHits = countMatches(text, [
+    /\b(research|news|report|briefing|sources?|latest|last\s+\d+\s+days?)\b/,
+    /调研|新闻|报告|最近|近[一二三四五六七\d]+天|资料|来源/,
+  ]);
+  const productionHits = countMatches(text, [
+    /\b(web(page)?|html|animation|animated|audio|voice|voiceover|tts|ppt|video|tiktok|douyin|synchronized|timeline)\b/,
+    /网页|动画|语音|口播|音频|播放|动态|同步|时间匹配|ppt|视频|抖音|科技感/,
+  ]);
+  const deliveryHits = countMatches(text, [
+    /\b(implement|build|create|generate|deliver|complete|full|end-to-end)\b/,
+    /实现|生成|创建|完整|分析并实现|整理成|形成一份/,
+  ]);
 
   if (reasoningHits >= 2) signals.push("reasoning markers");
   if (codeHits >= 2) signals.push("coding task");
+  if (researchHits > 0) signals.push("research task");
+  if (productionHits > 0) signals.push("media/web deliverable");
+  if (deliveryHits > 0) signals.push("implementation deliverable");
   if (simpleHits > 0 && codeHits === 0 && reasoningHits === 0 && chars < 900) signals.push("simple instruction");
 
   if (reasoningHits >= 2 || /reasoning|推理|深度/.test(text)) {
     return { tier: "reasoning", signals, confidence: 0.86 };
+  }
+  if (
+    (researchHits > 0 && productionHits > 0)
+    || (productionHits > 0 && deliveryHits > 0)
+    || researchHits + productionHits + deliveryHits >= 3
+  ) {
+    return { tier: "complex", signals, confidence: 0.82 };
   }
   if (codeHits >= 3 || chars > 2500 || lines > 40 || (contextTokens ?? 0) > 120_000) {
     return { tier: "complex", signals, confidence: 0.78 };
@@ -331,7 +353,8 @@ function scoreModel(model: RouterModel, metadata: Required<RouterModelMetadata>,
   });
   if (metadata.costClass === "free") score += profile.policy === "quality-first" && tier !== "simple" ? -8 : 18;
   if (metadata.deployment === "local") score += profile.policy === "quality-first" && tier !== "simple" ? -6 : 14;
-  if (metadata.costClass === "paid") score += profile.policy === "quality-first" ? 16 : profile.policy === "balanced" && (tier === "reasoning" || tier === "vision") ? 12 : -10;
+  if (metadata.costClass === "paid") score += profile.policy === "quality-first" ? 16 : profile.policy === "balanced" && (tier === "complex" || tier === "reasoning" || tier === "vision") ? 12 : -10;
+  if (metadata.deployment === "cloud" && profile.policy === "balanced" && (tier === "complex" || tier === "reasoning" || tier === "vision")) score += 10;
   if (metadata.capability === "strong" || metadata.capability === "vision") {
     score += tier === "complex" || tier === "reasoning" || tier === "vision" ? 14 : -4;
   }

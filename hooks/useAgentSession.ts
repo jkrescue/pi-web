@@ -189,6 +189,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const scrollContainerRef = useRef<HTMLDivElement | null>(null);
   const responseStartedAtRef = useRef<number | null>(null);
   const activeResponseModelRef = useRef<{ provider: string; modelId: string } | null>(null);
+  const currentModelRef = useRef<{ provider: string; modelId: string } | null>(null);
+  const lastRequestRef = useRef<{ message: string; hasImages: boolean } | null>(null);
+  const retryUpgradeInFlightRef = useRef(false);
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -203,6 +206,10 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   useEffect(() => {
     activeResponseModelRef.current = activeResponseModel;
   }, [activeResponseModel]);
+
+  useEffect(() => {
+    currentModelRef.current = displayModel;
+  }, [displayModel]);
 
   const sessionStats = (() => {
     const tokens = { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 };
@@ -323,10 +330,57 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
 
+  const upgradeModelAfterFailure = useCallback(async (trigger: string, errorMessage?: string) => {
+    if (routerMode !== "auto") return;
+    if (retryUpgradeInFlightRef.current) return;
+    const sid = sessionIdRef.current;
+    const cwd = newSessionCwd ?? session?.cwd;
+    const current = activeResponseModelRef.current ?? currentModelRef.current;
+    if (!sid || !cwd || !current) return;
+
+    retryUpgradeInFlightRef.current = true;
+    try {
+      const original = lastRequestRef.current?.message ?? "";
+      const res = await fetch("/api/router/route", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({
+          cwd,
+          message: [
+            `Previous local model failed during ${trigger}: ${errorMessage ?? "unknown error"}.`,
+            "This is a complex recovery task that needs stronger reasoning and reliable long task execution.",
+            original,
+          ].join("\n\n"),
+          hasImages: lastRequestRef.current?.hasImages ?? false,
+          currentModel: current,
+          profile: "best-quality",
+          contextTokens: contextUsage?.tokens ?? null,
+        }),
+      });
+      const body = (await res.json()) as { decision?: RouterDecision | null; error?: string };
+      if (!res.ok || body.error || !body.decision) throw new Error(body.error ?? `HTTP ${res.status}`);
+      const decision = body.decision;
+      setLastRouterDecision(decision);
+      lastRouterDecisionRef.current = decision;
+      if (!decision.changed) {
+        retryUpgradeInFlightRef.current = false;
+        return;
+      }
+
+      await sendAgentCommand(sid, { type: "set_model", provider: decision.provider, modelId: decision.modelId });
+      setCurrentModelOverride({ provider: decision.provider, modelId: decision.modelId });
+      setLiveResponseModel({ provider: decision.provider, modelId: decision.modelId });
+    } catch (e) {
+      retryUpgradeInFlightRef.current = false;
+      console.error("Failed to upgrade model after local failure:", e);
+    }
+  }, [contextUsage?.tokens, newSessionCwd, routerMode, session?.cwd, setLiveResponseModel]);
+
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "agent_start":
         responseStartedAtRef.current = responseStartedAtRef.current ?? Date.now();
+        retryUpgradeInFlightRef.current = false;
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -338,6 +392,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         setAgentPhase(null);
         responseStartedAtRef.current = null;
         setLiveResponseModel(null);
+        retryUpgradeInFlightRef.current = false;
         setRetryInfo(null);
         dispatch({ type: "end" });
         if (sessionIdRef.current) {
@@ -411,6 +466,12 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
             sendAgentCommand(sid, { type: "set_model", provider: upgrade.provider, modelId: upgrade.modelId })
               .then(() => setCurrentModelOverride({ provider: upgrade.provider, modelId: upgrade.modelId }))
               .catch((e) => console.error("Failed to auto-upgrade model:", e));
+          } else if (
+            assistant.stopReason === "error"
+            || assistant.errorMessage
+            || ((assistant.content ?? []).length === 0 && usageTotal === 0)
+          ) {
+            void upgradeModelAfterFailure("message_end", assistant.errorMessage ?? assistant.stopReason);
           }
         }
         if (completed && completed.role !== "user") {
@@ -441,9 +502,15 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         });
         break;
       }
-      case "auto_retry_start":
-        setRetryInfo({ attempt: event.attempt as number, maxAttempts: event.maxAttempts as number, errorMessage: event.errorMessage as string | undefined });
+      case "auto_retry_start": {
+        const attempt = Number(event.attempt ?? 0);
+        const errorMessage = event.errorMessage as string | undefined;
+        setRetryInfo({ attempt, maxAttempts: event.maxAttempts as number, errorMessage });
+        if (attempt >= 2) {
+          void upgradeModelAfterFailure(`auto_retry attempt ${attempt}`, errorMessage);
+        }
         break;
+      }
       case "auto_retry_end":
         setRetryInfo(null);
         break;
@@ -465,7 +532,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd, setLiveResponseModel]);
+  }, [loadSession, onAgentEnd, setLiveResponseModel, upgradeModelAfterFailure]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const routeForMessage = useCallback(async (message: string, hasImages: boolean): Promise<RouterDecision | null> => {
@@ -524,6 +591,8 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     completionScrollAllowedRef.current = true;
 
     const piImages = images?.map((img) => ({ type: "image" as const, data: img.data, mimeType: img.mimeType }));
+    lastRequestRef.current = { message, hasImages: Boolean(piImages?.length) };
+    retryUpgradeInFlightRef.current = false;
 
     try {
       const routeDecision = await routeForMessage(message, Boolean(piImages?.length));
