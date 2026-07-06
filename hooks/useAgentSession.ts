@@ -77,6 +77,11 @@ export interface CompactResultInfo {
   estimatedTokensAfter: number;
 }
 
+export interface SupervisorNotice {
+  level: "warning" | "error";
+  message: string;
+}
+
 export interface UseAgentSessionOptions {
   session: SessionInfo | null;
   newSessionCwd: string | null;
@@ -163,6 +168,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const [compactResult, setCompactResult] = useState<CompactResultInfo | null>(null);
   const [agentPhase, setAgentPhase] = useState<AgentPhase>(null);
   const [runtimeStats, setRuntimeStats] = useState<RuntimeStats>({ lastResponse: null });
+  const [supervisorNotice, setSupervisorNotice] = useState<SupervisorNotice | null>(null);
   const [routerMode, setRouterMode] = useState<RouterModeOption>(() => {
     if (typeof window === "undefined") return "manual";
     return window.localStorage.getItem("pi-web-router-mode") === "auto" ? "auto" : "manual";
@@ -192,6 +198,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
   const currentModelRef = useRef<{ provider: string; modelId: string } | null>(null);
   const lastRequestRef = useRef<{ message: string; hasImages: boolean } | null>(null);
   const retryUpgradeInFlightRef = useRef(false);
+  const progressRef = useRef({ lastFingerprint: "", localStalls: 0, strongStalls: 0 });
 
   const setToolPresetState = opts.setToolPreset ?? setToolPreset;
 
@@ -330,6 +337,50 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunningRef.current = agentRunning;
   }, [agentRunning]);
 
+  const modelLooksStrong = useCallback((model: { provider: string; modelId: string } | null): boolean => {
+    if (!model) return false;
+    const text = `${model.provider} ${model.modelId}`.toLowerCase();
+    return /\b(kimi|cloud|claude|gpt|opus|sonnet|o3|o1|deepseek)\b/.test(text);
+  }, []);
+
+  const messageText = useCallback((message: AgentMessage): string => {
+    const content = "content" in message ? message.content : "";
+    if (typeof content === "string") return content;
+    if (!Array.isArray(content)) return "";
+    return content
+      .filter((block): block is { type: "text"; text: string } => block.type === "text")
+      .map((block) => block.text)
+      .join("\n");
+  }, []);
+
+  const progressSignal = useCallback((message: AgentMessage): { kind: "progress" | "stall" | "ignore"; fingerprint: string; reason: string } => {
+    if (message.role === "assistant") {
+      const assistant = message as import("@/lib/types").AssistantMessage;
+      if (assistant.stopReason === "error" || assistant.errorMessage) {
+        return { kind: "stall", fingerprint: `assistant-error:${assistant.errorMessage ?? assistant.stopReason ?? "unknown"}`, reason: assistant.errorMessage ?? assistant.stopReason ?? "assistant error" };
+      }
+      const text = messageText(message).trim();
+      if (assistant.stopReason === "toolUse" && text.length < 8) return { kind: "ignore", fingerprint: "", reason: "tool call handoff" };
+      if (text.length > 80) return { kind: "progress", fingerprint: `assistant-text:${text.slice(0, 120)}`, reason: "assistant produced content" };
+      return { kind: "ignore", fingerprint: "", reason: "short assistant update" };
+    }
+
+    if (message.role === "toolResult") {
+      const text = messageText(message).trim();
+      const normalized = text.toLowerCase().replace(/\s+/g, " ").slice(0, 160);
+      if (!normalized || normalized === "(no output)") return { kind: "stall", fingerprint: "tool-empty-output", reason: "tool returned no output" };
+      if (/successfully wrote|saved|created|updated|file size:|^-rw|installed \d+ packages|exit_code: 0|command completed/i.test(text)) {
+        return { kind: "progress", fingerprint: `tool-progress:${normalized}`, reason: "tool produced an artifact or successful result" };
+      }
+      if (/command exited with code [1-9]|externally-managed-environment|error:|failed|traceback|not found|permission denied/i.test(text)) {
+        return { kind: "stall", fingerprint: `tool-error:${normalized}`, reason: "tool returned an error" };
+      }
+      return { kind: "progress", fingerprint: `tool-info:${normalized}`, reason: "tool produced new information" };
+    }
+
+    return { kind: "ignore", fingerprint: "", reason: "non-progress message" };
+  }, [messageText]);
+
   const upgradeModelAfterFailure = useCallback(async (trigger: string, errorMessage?: string) => {
     if (routerMode !== "auto") return;
     if (retryUpgradeInFlightRef.current) return;
@@ -367,20 +418,65 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         return;
       }
 
+      setSupervisorNotice({
+        level: "warning",
+        message: `Local model stalled (${trigger}); upgrading to ${decision.modelId}. Context stays in the same session.`,
+      });
       await sendAgentCommand(sid, { type: "set_model", provider: decision.provider, modelId: decision.modelId });
       setCurrentModelOverride({ provider: decision.provider, modelId: decision.modelId });
       setLiveResponseModel({ provider: decision.provider, modelId: decision.modelId });
+      progressRef.current = { lastFingerprint: "", localStalls: 0, strongStalls: 0 };
     } catch (e) {
       retryUpgradeInFlightRef.current = false;
       console.error("Failed to upgrade model after local failure:", e);
     }
   }, [contextUsage?.tokens, newSessionCwd, routerMode, session?.cwd, setLiveResponseModel]);
 
+  const observeProgress = useCallback((message: AgentMessage) => {
+    if (routerMode !== "auto") return;
+    const signal = progressSignal(message);
+    if (signal.kind === "ignore") return;
+
+    const current = activeResponseModelRef.current ?? currentModelRef.current;
+    const isStrong = modelLooksStrong(current);
+    const state = progressRef.current;
+    const repeated = signal.kind === "stall" || (signal.fingerprint && signal.fingerprint === state.lastFingerprint);
+
+    if (!repeated) {
+      progressRef.current = { lastFingerprint: signal.fingerprint, localStalls: 0, strongStalls: 0 };
+      return;
+    }
+
+    const next = {
+      lastFingerprint: signal.fingerprint || state.lastFingerprint,
+      localStalls: isStrong ? 0 : state.localStalls + 1,
+      strongStalls: isStrong ? state.strongStalls + 1 : 0,
+    };
+    progressRef.current = next;
+
+    if (!isStrong && next.localStalls >= 2) {
+      void upgradeModelAfterFailure("state_stall", signal.reason);
+      return;
+    }
+
+    if (isStrong && next.strongStalls >= 2) {
+      const sid = sessionIdRef.current;
+      setSupervisorNotice({
+        level: "error",
+        message: `Strong model stalled after ${next.strongStalls} checks (${signal.reason}). Paused for human intervention.`,
+      });
+      if (sid && agentRunningRef.current) {
+        sendAgentCommand(sid, { type: "abort" }).catch((e) => console.error("Failed to abort after supervisor stall:", e));
+      }
+    }
+  }, [modelLooksStrong, progressSignal, routerMode, upgradeModelAfterFailure]);
+
   const handleAgentEvent = useCallback((event: AgentEvent) => {
     switch (event.type) {
       case "agent_start":
         responseStartedAtRef.current = responseStartedAtRef.current ?? Date.now();
         retryUpgradeInFlightRef.current = false;
+        progressRef.current = { lastFingerprint: "", localStalls: 0, strongStalls: 0 };
         agentRunningRef.current = true;
         setAgentRunning(true);
         setAgentPhase({ kind: "waiting_model" });
@@ -475,7 +571,9 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
           }
         }
         if (completed && completed.role !== "user") {
-          setMessages((prev) => [...prev, normalizeToolCalls(completed)]);
+          const normalized = normalizeToolCalls(completed);
+          setMessages((prev) => [...prev, normalized]);
+          observeProgress(normalized);
         }
         dispatch({ type: "reset" });
         setLiveResponseModel(null);
@@ -532,7 +630,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
         }
         break;
     }
-  }, [loadSession, onAgentEnd, setLiveResponseModel, upgradeModelAfterFailure]);
+  }, [loadSession, observeProgress, onAgentEnd, setLiveResponseModel, upgradeModelAfterFailure]);
   handleAgentEventRef.current = handleAgentEvent;
 
   const routeForMessage = useCallback(async (message: string, hasImages: boolean): Promise<RouterDecision | null> => {
@@ -573,6 +671,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     if (!message.trim() && !images?.length) return;
     if (agentRunning) return;
 
+    setSupervisorNotice(null);
     const imageBlocks = images?.map((img) => ({ type: "image" as const, source: { type: "base64" as const, media_type: img.mimeType, data: img.data } }));
     responseStartedAtRef.current = Date.now();
     const userMsg: AgentMessage = {
@@ -710,6 +809,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     setRouterMode("manual");
     setLastRouterDecision(null);
     lastRouterDecisionRef.current = null;
+    setSupervisorNotice(null);
     if (isNew) {
       setNewSessionModel({ provider, modelId });
       return;
@@ -959,7 +1059,7 @@ export function useAgentSession(opts: UseAgentSessionOptions) {
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, newSessionModel, toolPreset, thinkingLevel,
     retryInfo, contextUsage, systemPrompt, forkingEntryId,
     isCompacting, compactError, compactResult, currentModel, displayModel, sessionStats, runtimeStats,
-    routerMode, routerProfile, lastRouterDecision, activeResponseModel,
+    routerMode, routerProfile, lastRouterDecision, activeResponseModel, supervisorNotice,
     isAutoModelSelection: isNew && newSessionModel === null,
     agentPhase,
     isNew,

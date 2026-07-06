@@ -104,7 +104,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
     agentRunning, modelNames, modelList, modelThinkingLevels, modelThinkingLevelMaps, toolPreset, thinkingLevel,
     retryInfo, contextUsage, forkingEntryId,
     isCompacting, compactError, compactResult, displayModel: displayModelValue, sessionStats, runtimeStats,
-    routerMode, routerProfile, lastRouterDecision, activeResponseModel,
+    routerMode, routerProfile, lastRouterDecision, activeResponseModel, supervisorNotice,
     isAutoModelSelection,
     agentPhase,
     isNew,
@@ -233,6 +233,7 @@ export function ChatWindow({ session, newSessionCwd, onAgentEnd, onSessionCreate
       availableThinkingLevels={availableThinkingLevels}
       thinkingLevelMap={currentThinkingLevelMap}
       retryInfo={retryInfo}
+      supervisorNotice={supervisorNotice}
       routerMode={routerMode}
       routerProfile={routerProfile}
       routerDecision={lastRouterDecision}

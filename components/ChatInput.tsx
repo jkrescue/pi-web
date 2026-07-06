@@ -39,6 +39,7 @@ interface Props {
   availableThinkingLevels?: string[] | null;
   thinkingLevelMap?: Record<string, string | null> | null;
   retryInfo?: { attempt: number; maxAttempts: number; errorMessage?: string } | null;
+  supervisorNotice?: { level: "warning" | "error"; message: string } | null;
   routerMode?: "manual" | "auto";
   routerProfile?: "cost-saver" | "balanced" | "best-quality";
   routerDecision?: RouterDecision | null;
@@ -91,7 +92,7 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
   onSend, onAbort, onSteer, onFollowUp, isStreaming, model, isAutoModelSelection, modelNames, modelList, onModelChange,
   onCompact, onAbortCompaction, isCompacting, compactError, compactResult, toolPreset, onToolPresetChange,
   thinkingLevel, onThinkingLevelChange, availableThinkingLevels, thinkingLevelMap,
-  retryInfo,
+  retryInfo, supervisorNotice,
   routerMode, routerProfile, routerDecision, onRouterModeChange, onRouterProfileChange,
   soundEnabled, onSoundToggle,
 }: Props, ref) {
@@ -363,6 +364,23 @@ export const ChatInput = forwardRef<ChatInputHandle, Props>(function ChatInput({
               <path d="M3 3v5h5" />
             </svg>
             Retrying ({retryInfo.attempt}/{retryInfo.maxAttempts})…{retryInfo.errorMessage && <span style={{ opacity: 0.7, marginLeft: 4 }}>— {retryInfo.errorMessage}</span>}
+          </div>
+        )}
+        {supervisorNotice && (
+          <div style={{
+            marginBottom: 8, padding: "5px 10px",
+            background: supervisorNotice.level === "error" ? "rgba(239,68,68,0.08)" : "rgba(59,130,246,0.08)",
+            border: supervisorNotice.level === "error" ? "1px solid rgba(239,68,68,0.24)" : "1px solid rgba(59,130,246,0.24)",
+            borderRadius: 6, fontSize: 12,
+            color: supervisorNotice.level === "error" ? "rgba(220,38,38,0.95)" : "rgba(37,99,235,0.95)",
+            display: "flex", alignItems: "center", gap: 6,
+          }}>
+            <svg width="11" height="11" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{ flexShrink: 0 }}>
+              <path d="M12 9v4" />
+              <path d="M12 17h.01" />
+              <path d="M10.29 3.86 1.82 18a2 2 0 0 0 1.71 3h16.94a2 2 0 0 0 1.71-3L13.71 3.86a2 2 0 0 0-3.42 0z" />
+            </svg>
+            {supervisorNotice.message}
           </div>
         )}
         {compactResultText && (
