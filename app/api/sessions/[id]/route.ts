@@ -13,6 +13,12 @@ import { getRpcSession } from "@/lib/rpc-manager";
 // BranchNavigator still traverses recursively, so keep the response tree shallow.
 const MAX_PROJECTED_TREE_DEPTH = 200;
 
+function isBusyAgentState(state: unknown): boolean {
+  if (typeof state !== "object" || state === null) return false;
+  const liveState = state as { isStreaming?: unknown; isCompacting?: unknown };
+  return liveState.isStreaming === true || liveState.isCompacting === true;
+}
+
 /**
  * Project the session tree into the shallow navigation tree sent to the client.
  * Keeps roots, branch points, and leaves while contracting single-child chains
@@ -156,7 +162,7 @@ export async function GET(
       const rpc = getRpcSession(id);
       if (rpc?.isAlive()) {
         const state = await rpc.send({ type: "get_state" });
-        agentState = { running: true, state };
+        agentState = { running: isBusyAgentState(state), state };
       } else {
         agentState = { running: false };
       }

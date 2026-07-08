@@ -9,6 +9,12 @@ function isStaleModelRegistryError(error: unknown, commandType: string | undefin
   return message.startsWith("Model not found:");
 }
 
+function isBusyAgentState(state: unknown): boolean {
+  if (typeof state !== "object" || state === null) return false;
+  const liveState = state as { isStreaming?: unknown; isCompacting?: unknown };
+  return liveState.isStreaming === true || liveState.isCompacting === true;
+}
+
 // POST /api/agent/[id] - Send a command to an existing session
 export async function POST(
   req: Request,
@@ -63,7 +69,7 @@ export async function GET(
     }
 
     const state = await session.send({ type: "get_state" });
-    return NextResponse.json({ running: true, state });
+    return NextResponse.json({ running: isBusyAgentState(state), state });
   } catch (error) {
     return NextResponse.json({ error: String(error) }, { status: 500 });
   }
