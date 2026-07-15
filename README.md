@@ -4,13 +4,41 @@
 
 ## 快速开始
 
-**无需安装，直接运行：**
+### 使用 GitHub 最新同步版
+
+如果你要使用 `jkrescue/pi-web` 仓库中的最新代码，而不是 npm registry 上发布的版本，请从 GitHub 克隆或更新：
+
+```bash
+git clone https://github.com/jkrescue/pi-web.git
+cd pi-web
+npm install
+npm run build
+npm install -g .
+pi-web
+```
+
+已经克隆过仓库时，后续同步最新版本：
+
+```bash
+cd pi-web
+git pull
+npm install
+npm run build
+npm install -g .
+pi-web
+```
+
+### 使用 npm 发布版
+
+npm 上的 `@agegr/pi-web` 是发布版本，可能会落后于 GitHub 仓库中的最新代码。
+
+**无需安装，直接运行 npm 发布版：**
 
 ```bash
 npx @agegr/pi-web@latest
 ```
 
-**或全局安装后使用：**
+**或全局安装 npm 发布版后使用：**
 
 ```bash
 npm install -g @agegr/pi-web
